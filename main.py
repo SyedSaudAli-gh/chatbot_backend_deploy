@@ -1,70 +1,53 @@
-from agents import Agent, Runner, OpenAIChatCompletionsModel
-from openai import AsyncOpenAI
-from dotenv import load_dotenv
-import os
 from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+import google.generativeai as genai
+from dotenv import load_dotenv
+import os
 import json
 import asyncio
-import traceback
 
 load_dotenv()
 
+# Gemini Configuration
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL")
 
-# Startup validation
 print("=" * 50)
 print("🚀 Starting Chatbot Backend...")
 print(f"📍 API Key Present: {bool(GEMINI_API_KEY)}")
-print(f"📍 API Key (first 10 chars): {GEMINI_API_KEY[:10] if GEMINI_API_KEY else 'MISSING'}")
-print(f"📍 Base URL: {GEMINI_BASE_URL}")
+print(f"📍 API Key (first 10): {GEMINI_API_KEY[:10] if GEMINI_API_KEY else 'MISSING'}")
 print("=" * 50)
 
 if not GEMINI_API_KEY:
-    raise ValueError("❌ GEMINI_API_KEY is not set in environment variables!")
+    raise ValueError("❌ GEMINI_API_KEY not found in environment!")
 
-if not GEMINI_BASE_URL:
-    raise ValueError("❌ GEMINI_BASE_URL is not set in environment variables!")
+# Configure Gemini
+genai.configure(api_key=GEMINI_API_KEY)
 
-client = AsyncOpenAI(
-    api_key=GEMINI_API_KEY,
-    base_url=GEMINI_BASE_URL
-)
+# System prompt for Full Stack Developer Agent
+SYSTEM_PROMPT = """You are an expert Full Stack Developer Agent specializing in Frontend, Backend, and FastAPI.
 
-model = OpenAIChatCompletionsModel(
-    model="gemini-2.0-flash",
-    openai_client=client
-)
+Core Skills:
+- Frontend: React, Vue, Angular, JavaScript, TypeScript, CSS, Next.js
+- Backend: FastAPI (specialist), Python, Node.js, Express
+- Databases: SQL (PostgreSQL, MySQL), NoSQL (MongoDB, Redis)
+- Tools: Git, Docker, REST APIs, GraphQL
 
-full_stack_developer_agent = Agent(
-    name="Full Stack Developer Agent",
-    instructions="""
-        Role: Expert Full Stack Developer specializing in Frontend, Backend, and FastAPI.
+Response Rules:
+1. Ask clarifying questions if the request is unclear
+2. Provide structured, well-commented code solutions
+3. Explain your reasoning and best practices
+4. Focus on security, performance, and scalability
+5. Use proper code blocks with language tags
+6. Be concise but thorough
 
-        Core Skills:
-        - Frontend: React, Vue, Angular, JavaScript, TypeScript, CSS
-        - Backend: FastAPI (specialist), Python, Node.js
-        - Databases: SQL (PostgreSQL), NoSQL (MongoDB)
-        - Tools: Git, Docker, REST APIs
+Your specialty is FastAPI development, frontend-backend integration, and practical problem-solving.
+Your goal is to help developers build better software through clear, actionable guidance."""
 
-        Response Rules:
-        - Ask clarifying questions if request is unclear
-        - Provide structured, code-commented solutions
-        - Explain reasoning behind answers
-        - Focus on security and best practices
-        - Use code blocks with language tags
+app = FastAPI(title="Full Stack Developer Agent API")
 
-        Specialty: FastAPI development, frontend-backend integration, problem-solving.
-        Goal: Help users build better software through clear, actionable guidance.
-""",
-    model=model
-)
-
-app = FastAPI()
-
+# CORS Configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -76,151 +59,92 @@ app.add_middleware(
 @app.get("/")
 def read_root():
     return {
-        "message": "Hello from Saud Ali",
+        "message": "Hello from Saud Ali - Full Stack Developer Agent",
         "status": "running",
-        "model": "gemini-2.0-flash",
-        "api_configured": bool(GEMINI_API_KEY)
+        "model": "gemini-2.0-flash-exp",
+        "endpoints": ["/chat", "/chat/stream", "/health"]
     }
 
 @app.get("/health")
 def health_check():
     return {
         "status": "healthy",
-        "api_key_present": bool(GEMINI_API_KEY),
-        "base_url": GEMINI_BASE_URL,
-        "model": "gemini-2.0-flash"
+        "api_configured": bool(GEMINI_API_KEY),
+        "model": "gemini-2.0-flash-exp"
     }
 
 class ChatRequest(BaseModel):
     message: str
 
-# Non-streaming endpoint - for testing
+# Non-streaming endpoint
 @app.post("/chat")
 async def chat(req: ChatRequest):
     try:
-        print(f"\n{'='*50}")
-        print(f"📥 Received message: {req.message}")
+        print(f"\n📥 Received: {req.message}")
         
-        result = await Runner.run(
-            full_stack_developer_agent,
-            req.message
+        # Create model
+        model = genai.GenerativeModel(
+            model_name='gemini-2.0-flash-exp',
+            system_instruction=SYSTEM_PROMPT
         )
         
-        print(f"✅ Response generated successfully")
-        print(f"📤 Response length: {len(result.final_output)}")
-        print(f"{'='*50}\n")
+        # Generate response
+        response = model.generate_content(req.message)
         
-        return {"response": result.final_output}
+        print(f"✅ Response generated ({len(response.text)} chars)")
+        
+        return {"response": response.text}
     
     except Exception as e:
-        print(f"❌ Error in /chat: {str(e)}")
+        print(f"❌ Error: {str(e)}")
+        import traceback
         traceback.print_exc()
         return {"error": str(e)}
 
-# Streaming endpoint - IMPROVED VERSION
+# Streaming endpoint
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest):
     async def event_generator():
         try:
             print(f"\n{'='*50}")
             print(f"📥 Stream Request: {req.message}")
-            print(f"🔄 Starting streaming response...")
             
-            # Try streaming first
-            try:
-                print("🔍 Attempting run_streamed...")
-                stream_result = Runner.run_streamed(
-                    full_stack_developer_agent,
-                    req.message
-                )
-                
-                print(f"📊 Stream result type: {type(stream_result)}")
-                
-                # Method 1: Check for .stream()
-                if hasattr(stream_result, 'stream'):
-                    print("✅ Using .stream() method")
-                    chunk_count = 0
-                    async for chunk in stream_result.stream():
-                        content = None
-                        
-                        if hasattr(chunk, 'delta') and chunk.delta:
-                            content = chunk.delta
-                        elif hasattr(chunk, 'content') and chunk.content:
-                            content = chunk.content
-                        elif isinstance(chunk, str):
-                            content = chunk
-                        
-                        if content:
-                            chunk_count += 1
-                            data = json.dumps({"content": content})
-                            yield f"data: {data}\n\n"
-                            print(f"📤 Chunk {chunk_count}: {content[:50]}...")
-                            await asyncio.sleep(0.01)
-                    
-                    print(f"✅ Streamed {chunk_count} chunks")
-                
-                # Method 2: Direct async iteration
-                elif hasattr(stream_result, '__aiter__'):
-                    print("✅ Using async iteration")
-                    chunk_count = 0
-                    async for chunk in stream_result:
-                        content = None
-                        
-                        if hasattr(chunk, 'delta') and chunk.delta:
-                            content = chunk.delta
-                        elif hasattr(chunk, 'content') and chunk.content:
-                            content = chunk.content
-                        elif isinstance(chunk, str):
-                            content = chunk
-                        
-                        if content:
-                            chunk_count += 1
-                            data = json.dumps({"content": content})
-                            yield f"data: {data}\n\n"
-                            print(f"📤 Chunk {chunk_count}: {content[:50]}...")
-                            await asyncio.sleep(0.01)
-                    
-                    print(f"✅ Streamed {chunk_count} chunks")
-                
-                else:
-                    raise Exception("Stream object not iterable")
+            # Create model
+            model = genai.GenerativeModel(
+                model_name='gemini-2.0-flash-exp',
+                system_instruction=SYSTEM_PROMPT
+            )
             
-            except Exception as stream_error:
-                print(f"⚠️ Streaming failed: {str(stream_error)}")
-                print("🔄 Falling back to simulated streaming...")
-                
-                # Fallback: Get full response and simulate streaming
-                result = await Runner.run(
-                    full_stack_developer_agent,
-                    req.message
-                )
-                full_response = result.final_output
-                print(f"📊 Full response length: {len(full_response)}")
-                
-                # Stream word by word
-                words = full_response.split()
-                for i, word in enumerate(words):
-                    chunk = word if i == 0 else f" {word}"
-                    data = json.dumps({"content": chunk})
+            # Generate streaming response
+            response = model.generate_content(
+                req.message,
+                stream=True
+            )
+            
+            chunk_count = 0
+            
+            # Stream chunks
+            for chunk in response:
+                if chunk.text:
+                    chunk_count += 1
+                    data = json.dumps({"content": chunk.text})
                     yield f"data: {data}\n\n"
-                    await asyncio.sleep(0.04)
-                
-                print(f"✅ Simulated streaming of {len(words)} words")
+                    print(f"📤 Chunk {chunk_count}: {chunk.text[:50]}...")
+                    await asyncio.sleep(0.01)
             
             # Send done signal
-            print("🏁 Sending done signal...")
             yield f"data: {json.dumps({'done': True})}\n\n"
+            print(f"✅ Stream completed - {chunk_count} chunks sent")
             print(f"{'='*50}\n")
             
         except Exception as e:
             error_msg = str(e)
-            print(f"\n❌ ERROR in stream:")
-            print(f"📛 Error: {error_msg}")
+            print(f"\n❌ Stream Error: {error_msg}")
+            import traceback
             traceback.print_exc()
-            print(f"{'='*50}\n")
             
             yield f"data: {json.dumps({'error': error_msg})}\n\n"
-
+    
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
