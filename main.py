@@ -8,11 +8,26 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import json
 import asyncio
+import traceback
 
 load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL")
+
+# Startup validation
+print("=" * 50)
+print("🚀 Starting Chatbot Backend...")
+print(f"📍 API Key Present: {bool(GEMINI_API_KEY)}")
+print(f"📍 API Key (first 10 chars): {GEMINI_API_KEY[:10] if GEMINI_API_KEY else 'MISSING'}")
+print(f"📍 Base URL: {GEMINI_BASE_URL}")
+print("=" * 50)
+
+if not GEMINI_API_KEY:
+    raise ValueError("❌ GEMINI_API_KEY is not set in environment variables!")
+
+if not GEMINI_BASE_URL:
+    raise ValueError("❌ GEMINI_BASE_URL is not set in environment variables!")
 
 client = AsyncOpenAI(
     api_key=GEMINI_API_KEY,
@@ -60,76 +75,127 @@ app.add_middleware(
 
 @app.get("/")
 def read_root():
-    return {"message": "Hello from Saud Ali"}
+    return {
+        "message": "Hello from Saud Ali",
+        "status": "running",
+        "model": "gemini-2.0-flash",
+        "api_configured": bool(GEMINI_API_KEY)
+    }
+
+@app.get("/health")
+def health_check():
+    return {
+        "status": "healthy",
+        "api_key_present": bool(GEMINI_API_KEY),
+        "base_url": GEMINI_BASE_URL,
+        "model": "gemini-2.0-flash"
+    }
 
 class ChatRequest(BaseModel):
     message: str
 
-# Non-streaming endpoint
+# Non-streaming endpoint - for testing
 @app.post("/chat")
 async def chat(req: ChatRequest):
-    result = await Runner.run(
-        full_stack_developer_agent,
-        req.message
-    )
-    return {"response": result.final_output}
+    try:
+        print(f"\n{'='*50}")
+        print(f"📥 Received message: {req.message}")
+        
+        result = await Runner.run(
+            full_stack_developer_agent,
+            req.message
+        )
+        
+        print(f"✅ Response generated successfully")
+        print(f"📤 Response length: {len(result.final_output)}")
+        print(f"{'='*50}\n")
+        
+        return {"response": result.final_output}
+    
+    except Exception as e:
+        print(f"❌ Error in /chat: {str(e)}")
+        traceback.print_exc()
+        return {"error": str(e)}
 
-# Streaming endpoint - FIXED VERSION
+# Streaming endpoint - IMPROVED VERSION
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest):
     async def event_generator():
         try:
-            print(f"Received message: {req.message}")
+            print(f"\n{'='*50}")
+            print(f"📥 Stream Request: {req.message}")
+            print(f"🔄 Starting streaming response...")
             
-            # Run streaming
-            stream_result = Runner.run_streamed(
-                full_stack_developer_agent,
-                req.message
-            )
-            
-            print(f"Stream result type: {type(stream_result)}")
-            
-            # Check if result has streaming attribute
-            if hasattr(stream_result, 'stream'):
-                print("Using .stream() method")
-                async for chunk in stream_result.stream():
-                    if hasattr(chunk, 'delta') and chunk.delta:
-                        content = chunk.delta
-                    elif hasattr(chunk, 'content') and chunk.content:
-                        content = chunk.content
-                    else:
-                        continue
+            # Try streaming first
+            try:
+                print("🔍 Attempting run_streamed...")
+                stream_result = Runner.run_streamed(
+                    full_stack_developer_agent,
+                    req.message
+                )
+                
+                print(f"📊 Stream result type: {type(stream_result)}")
+                
+                # Method 1: Check for .stream()
+                if hasattr(stream_result, 'stream'):
+                    print("✅ Using .stream() method")
+                    chunk_count = 0
+                    async for chunk in stream_result.stream():
+                        content = None
+                        
+                        if hasattr(chunk, 'delta') and chunk.delta:
+                            content = chunk.delta
+                        elif hasattr(chunk, 'content') and chunk.content:
+                            content = chunk.content
+                        elif isinstance(chunk, str):
+                            content = chunk
+                        
+                        if content:
+                            chunk_count += 1
+                            data = json.dumps({"content": content})
+                            yield f"data: {data}\n\n"
+                            print(f"📤 Chunk {chunk_count}: {content[:50]}...")
+                            await asyncio.sleep(0.01)
                     
-                    data = json.dumps({"content": content})
-                    yield f"data: {data}\n\n"
-                    print(f"Sent chunk: {content[:50]}...")
-                    await asyncio.sleep(0.01)
-            
-            # Check if it's directly iterable
-            elif hasattr(stream_result, '__aiter__'):
-                print("Using async iteration")
-                async for chunk in stream_result:
-                    if hasattr(chunk, 'delta') and chunk.delta:
-                        content = chunk.delta
-                    elif hasattr(chunk, 'content') and chunk.content:
-                        content = chunk.content
-                    else:
-                        continue
+                    print(f"✅ Streamed {chunk_count} chunks")
+                
+                # Method 2: Direct async iteration
+                elif hasattr(stream_result, '__aiter__'):
+                    print("✅ Using async iteration")
+                    chunk_count = 0
+                    async for chunk in stream_result:
+                        content = None
+                        
+                        if hasattr(chunk, 'delta') and chunk.delta:
+                            content = chunk.delta
+                        elif hasattr(chunk, 'content') and chunk.content:
+                            content = chunk.content
+                        elif isinstance(chunk, str):
+                            content = chunk
+                        
+                        if content:
+                            chunk_count += 1
+                            data = json.dumps({"content": content})
+                            yield f"data: {data}\n\n"
+                            print(f"📤 Chunk {chunk_count}: {content[:50]}...")
+                            await asyncio.sleep(0.01)
                     
-                    data = json.dumps({"content": content})
-                    yield f"data: {data}\n\n"
-                    print(f"Sent chunk: {content[:50]}...")
-                    await asyncio.sleep(0.01)
+                    print(f"✅ Streamed {chunk_count} chunks")
+                
+                else:
+                    raise Exception("Stream object not iterable")
             
-            # Fallback: Get full response and simulate streaming
-            else:
-                print("Fallback: Using simulated streaming")
+            except Exception as stream_error:
+                print(f"⚠️ Streaming failed: {str(stream_error)}")
+                print("🔄 Falling back to simulated streaming...")
+                
+                # Fallback: Get full response and simulate streaming
                 result = await Runner.run(
                     full_stack_developer_agent,
                     req.message
                 )
                 full_response = result.final_output
-                print(f"Got response length: {len(full_response)}")
+                print(f"📊 Full response length: {len(full_response)}")
                 
                 # Stream word by word
                 words = full_response.split()
@@ -138,16 +204,21 @@ async def chat_stream(req: ChatRequest):
                     data = json.dumps({"content": chunk})
                     yield f"data: {data}\n\n"
                     await asyncio.sleep(0.04)
+                
+                print(f"✅ Simulated streaming of {len(words)} words")
             
             # Send done signal
+            print("🏁 Sending done signal...")
             yield f"data: {json.dumps({'done': True})}\n\n"
-            print("Stream completed")
+            print(f"{'='*50}\n")
             
         except Exception as e:
             error_msg = str(e)
-            print(f"Error: {error_msg}")
-            import traceback
+            print(f"\n❌ ERROR in stream:")
+            print(f"📛 Error: {error_msg}")
             traceback.print_exc()
+            print(f"{'='*50}\n")
+            
             yield f"data: {json.dumps({'error': error_msg})}\n\n"
 
     return StreamingResponse(
@@ -159,3 +230,7 @@ async def chat_stream(req: ChatRequest):
             "Connection": "keep-alive",
         }
     )
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
